@@ -1,12 +1,31 @@
 #!/bin/bash
 
-#Usage: bash vdo_recovery.sh vdo0 sdb /mnt/vdo0
+# Usage: bash vdo_recover.sh vdo0 sdb /mnt/vdo0
 
 # Argument:
 
 vdo_device=$1
 disk=$2
 mount_point=$3
+
+# Check if argument passed or not
+
+if [ -z $1 ] || [ -z $2 ] || [ -z $3 ]; then
+	echo "Usage: bash vdo_recover.sh <vdo device> <disk> <mount-point>"
+else
+	echo "Recovery in Progress"
+fi
+
+# Check if script is run by root user
+
+if [[ $EUID -ne 0 ]]; then
+   echo "$0: cannot open $disk: Permission denied" 1>&2
+   exit 100
+fi
+
+# Check if the device is a valid VDO device
+
+
 
 # Checking if filesystem is mounted or not
 
@@ -34,7 +53,7 @@ mount /dev/mapper/$vdo_device-snap $mount_point
 
 fstrim $mount_point
 
-#vdostats $vdo_device
+vdostats $vdo_device
 
 umount $mount_point
 
@@ -62,5 +81,3 @@ if grep -qs "$mount_point" /proc/mounts; then
 else
   echo "It's not mounted."
 fi
-
-
