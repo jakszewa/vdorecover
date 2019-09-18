@@ -1,100 +1,112 @@
 #!/bin/bash -x
 
-# Usage: bash vdo_recover.sh vdo0 /mnt/vdo0
-
-_recoveryProcess(){
-
-  # Recovery process
-
-  vdo_sectors=$(dmsetup table $vdo_device | awk '{print $2}')
-
-  truncate -s 10G /tmp/$vdo_device-tmp_loopback_file 
-
-  loopback=$(losetup -f /tmp/$vdo_device-tmp_loopback_file --show)
-
-  dmsetup create $vdo_device-origin --table "0 $vdo_sectors snapshot-origin /dev/mapper/$vdo_device"
-
-  dmsetup create $vdo_device-snap --table "0 $vdo_sectors snapshot /dev/mapper/$vdo_device /dev/loop0 PO 4096 2 discard_zeroes_cow discard_passdown_origin"
-
-  mount /dev/mapper/$vdo_device-snap $mount_point
-
-  fstrim $mount_point
-
-  vdostats $vdo_device
-
-  dmsetup status $vdo_device-snap # Put check to see if <number of sectors used> doesn't reach the same as <total number of sectors available>.
-
-  umount $mount_point
-
-  # Restoring original stack
-
-  dmsetup remove $vdo_device-origin
-
-  dmsetup suspend $vdo_device-snap
-
-  dmsetup create $vdo_device-merge --table "0 $vdo_sectors snapshot-merge /dev/mapper/$vdo_device /dev/loop0 PO 4096"
-
-  dmsetup status $vdo_device-merge # Monitor the merge. numerator of the second-to-last field and the last field are equal (i.e. "8192/29438239823 8192").
-
-  dmsetup remove $vdo_device-merge
-
-  dmsetup remove $vdo_device-snap
-
-  losetup  -d $loopback
-
-  rm -f /tmp/$vdo_device-tmp_loopback_file
-
-  mount /dev/mapper/$vdo_device $mount_point
-
-  if grep -qs "$mount_point" /proc/mounts; then
-    echo "Recovery process completed, share is mounted."
-    echo "Warning: Extend underlying disk"
-  else
-    echo "It's not mounted."
-  fi
-}
+# Usage: ./vdo_recover.sh /dev/mapper/vdo0
 
 # Argument:
 
-vdo_device=$1
-mount_point=$2
+VDO_VOLUME=$1
+#MOUNT_POINT=$2
+
+_recoveryProcess(){
+
+# Recovery process
+
+  VDO_SECTORS=$(dmsetup table $VDO_DEVICE | awk '{print $2}')
+
+  truncate -s 10G /tmp/$VDO_DEVICE-tmp_loopback_file 
+
+  LOOPBACK=$(losetup -f /tmp/$VDO_DEVICE-tmp_loopback_file --show)
+
+  dmsetup create $VDO_DEVICE-origin --table "0 $VDO_SECTORS snapshot-origin /dev/mapper/$VDO_DEVICE"
+
+  dmsetup create $VDO_DEVICE-snap --table "0 $VDO_SECTORS snapshot /dev/mapper/$VDO_DEVICE /dev/loop0 PO 4096 2 discard_zeroes_cow discard_passdown_origin"
+
+# Temporary directory function
+  _tmpMountPoint
+
+  mount /dev/mapper/$VDO_DEVICE-snap $MOUNT_POINT
+
+  fstrim $MOUNT_POINT
+
+  vdostats $VDO_DEVICE
+
+  dmsetup status $VDO_DEVICE-snap # Put check to see if <number of sectors used> doesn't reach the same as <total number of sectors available>.
+
+  umount $MOUNT_POINT
+
+# Restoring original stack
+
+  dmsetup remove $VDO_DEVICE-origin
+
+  dmsetup suspend $VDO_DEVICE-snap
+
+  dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE /dev/loop0 PO 4096"
+
+  dmsetup status $VDO_DEVICE-merge # Monitor the merge. numerator of the second-to-last field and the last field are equal (i.e. "8192/29438239823 8192").
+
+  dmsetup remove $VDO_DEVICE-merge
+
+  dmsetup remove $VDO_DEVICE-snap
+
+  losetup  -d $LOOPBACK
+
+  rm -f /tmp/$VDO_DEVICE-tmp_loopback_file
+
+  echo "Recovery process completed."
+  echo "Warning: Extend underlying disk"
+}
+
+_tmpMountPoint(){
+
+  TMPDIR=/tmp
+  timestamp=`date +%Y-%m-%d_%H:%M:%S`
+  mkdir -p $TMPDIR/vdo-recover-$timestamp
+  MOUNT_POINT=$TMPDIR/vdo-recover-$timestamp
+
+}
+
+_checkVDO(){
+
+VDO_LIST=$(vdo list)
+
+VDO_DEVICE=$(echo $VDO_VOLUME | awk -F "/" '{print $4}')
+}
 
 # Check if argument passed or not
 
-if [ -z $1 ] || [ -z $2 ]; then
+#if [ -z $1 ] || [ -z $2 ]; then
+if [ -z $1 ]; then
 	echo "Usage: bash vdo_recover.sh <vdo device> <mount-point>"
 else
   # Check if script is run by root user
 
   if [[ $EUID -ne 0 ]]; then
-    echo "$0: cannot open $vdo_device: Permission denied" 1>&2
-    exit 100
+    echo "$0: cannot open $VDO_DEVICE: Permission denied" 1>&2
+    exit 1
   else
-    # Check if the device is a valid VDO device
+    # Check for valid VDO volume
+    _checkVDO
 
-    vdo_list=$(vdo list)
-
-    for entry in $vdo_list;
+    for entry in $VDO_LIST;
     do
-            if [ ${entry[@]} = $vdo_device ]; then
+            if [ ${entry[@]} = $VDO_DEVICE ]; then
+
                   # Check if mount-point directory exist
+#                  if [[ -d $MOUNT_POINT ]]; then
 
-                  if [[ -d $mount_point ]]; then
                         # Checking if filesystem is mounted or not
-
-                        if grep -qs "$mount_point" /proc/mounts; then
-                          umount $mount_point
-                          echo "It's umounted."
+                        if grep -qs "$VDO_VOLUME" /proc/mounts; then
+                          echo "$VDO_VOLUME is mounted."
                         else
                           echo "It's not mounted, recovery process started"
-                          # Put function name here
+                          # Recovery function
                           _recoveryProcess
                         fi
-                  else
-                          echo "No such file or directory"
-                  fi
+#                  else
+#                          echo "No such file or directory"
+#                  fi
             else
-                    echo "$vdo_device not present"
+                    echo "$VDO_DEVICE not present"
             fi
     done
   fi
