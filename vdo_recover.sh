@@ -7,6 +7,41 @@
 VDO_VOLUME=$1
 #MOUNT_POINT=$2
 
+_fstrimVDO(){
+
+local NUMERATOR=$(dmsetup status $VDO_DEVICE-snap | awk '{print $4}' | awk -F "/" '{print $1}')
+local DENOMINATOR=$(dmsetup status $VDO_DEVICE-snap | awk '{print $4}' | awk -F "/" '{print $2}')
+
+if [[ $NUMERATOR -lt $DENOMINATOR ]];then
+        fstrim $MOUNT_POINT
+        umount $MOUNT_POINT
+        rmdir $MOUNT_POINT
+fi
+
+}
+
+_mergeVDO(){
+
+  dmsetup remove $VDO_DEVICE-origin
+
+  dmsetup suspend $VDO_DEVICE-snap
+
+  dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096"
+
+  local NUMERATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $4}' | awk -F "/" '{print $1}')
+  local DENOMINATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $5}')
+
+  if [[ $NUMERATOR -ne $DENOMINATOR ]];then
+        read -p "Merging...." -t 10
+        echo ""
+  fi
+
+  dmsetup remove $VDO_DEVICE-merge
+
+  dmsetup remove $VDO_DEVICE-snap
+
+}
+
 _recoveryProcess(){
 
 # Recovery process
@@ -19,34 +54,40 @@ _recoveryProcess(){
 
   dmsetup create $VDO_DEVICE-origin --table "0 $VDO_SECTORS snapshot-origin /dev/mapper/$VDO_DEVICE"
 
-  dmsetup create $VDO_DEVICE-snap --table "0 $VDO_SECTORS snapshot /dev/mapper/$VDO_DEVICE /dev/loop0 PO 4096 2 discard_zeroes_cow discard_passdown_origin"
+  dmsetup create $VDO_DEVICE-snap --table "0 $VDO_SECTORS snapshot /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096 2 discard_zeroes_cow discard_passdown_origin"
 
 # Temporary directory function
   _tmpMountPoint
 
-  mount /dev/mapper/$VDO_DEVICE-snap $MOUNT_POINT
+# FSTRIM function
+  _fstrimVDO
 
-  fstrim $MOUNT_POINT
+  #mount /dev/mapper/$VDO_DEVICE-snap $MOUNT_POINT
 
-  vdostats $VDO_DEVICE
+  #dmsetup status $VDO_DEVICE-snap
 
-  dmsetup status $VDO_DEVICE-snap # Put check to see if <number of sectors used> doesn't reach the same as <total number of sectors available>.
+  #fstrim $MOUNT_POINT
 
-  umount $MOUNT_POINT
+  #vdostats $VDO_DEVICE
+
+  #dmsetup status $VDO_DEVICE-snap # Put check to see if <number of sectors used> doesn't reach the same as <total number of sectors available>.
+
+  #umount $MOUNT_POINT
 
 # Restoring original stack
 
-  dmsetup remove $VDO_DEVICE-origin
+  _mergeVDO
+  #dmsetup remove $VDO_DEVICE-origin
 
-  dmsetup suspend $VDO_DEVICE-snap
+  #dmsetup suspend $VDO_DEVICE-snap
 
-  dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE /dev/loop0 PO 4096"
+  #dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE /dev/loop0 PO 4096"
 
-  dmsetup status $VDO_DEVICE-merge # Monitor the merge. numerator of the second-to-last field and the last field are equal (i.e. "8192/29438239823 8192").
+  #dmsetup status $VDO_DEVICE-merge # Monitor the merge. numerator of the second-to-last field and the last field are equal (i.e. "8192/29438239823 8192").
 
-  dmsetup remove $VDO_DEVICE-merge
+  #dmsetup remove $VDO_DEVICE-merge
 
-  dmsetup remove $VDO_DEVICE-snap
+  #dmsetup remove $VDO_DEVICE-snap
 
   losetup  -d $LOOPBACK
 
@@ -62,6 +103,7 @@ _tmpMountPoint(){
   timestamp=`date +%Y-%m-%d_%H:%M:%S`
   mkdir -p $TMPDIR/vdo-recover-$timestamp
   MOUNT_POINT=$TMPDIR/vdo-recover-$timestamp
+  mount /dev/mapper/$VDO_DEVICE-snap $MOUNT_POINT
 
 }
 
@@ -92,7 +134,7 @@ else
             if [ ${entry[@]} = $VDO_DEVICE ]; then
 
                   # Check if mount-point directory exist
-#                  if [[ -d $MOUNT_POINT ]]; then
+                  #if [[ -d $MOUNT_POINT ]]; then
 
                         # Checking if filesystem is mounted or not
                         if grep -qs "$VDO_VOLUME" /proc/mounts; then
@@ -102,9 +144,9 @@ else
                           # Recovery function
                           _recoveryProcess
                         fi
-#                  else
-#                          echo "No such file or directory"
-#                  fi
+                  #else
+                        #echo "No such file or directory"
+                  #fi
             else
                     echo "$VDO_DEVICE not present"
             fi
