@@ -1,8 +1,9 @@
 #!/bin/bash -x
 
-# Argument:
-
 VDO_VOLUME=$1
+MNTPT=$2
+
+TMPDIR=/tmp
 
 _fstrimVDO(){
 
@@ -20,9 +21,7 @@ fi
 _mergeVDO(){
 
   dmsetup remove $VDO_DEVICE-origin
-
   dmsetup suspend $VDO_DEVICE-snap
-
   dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096"
 
   local NUMERATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $4}' | awk -F "/" '{print $1}')
@@ -33,57 +32,83 @@ _mergeVDO(){
   fi
 
   dmsetup remove $VDO_DEVICE-merge
-
   dmsetup remove $VDO_DEVICE-snap
+  losetup  -d $LOOPBACK
 
+}
+
+_rmSnpDir(){
+  if [[ -z $MNTPT ]]; then
+    rm -f $RUNDIR/$VDO_DEVICE-tmp_loopback_file
+    rmdir $RUNDIR
+  else
+    rm -f $MNTPT/$VDO_DEVICE-tmp_loopback_file
+  fi
+  
 }
 
 _recoveryProcess(){
 
-# Recovery process
-
   VDO_SECTORS=$(dmsetup table $VDO_DEVICE | awk '{print $2}')
 
-  _tmpDevSize
-
-  truncate -s $LO_DEV_SIZE /tmp/$VDO_DEVICE-tmp_loopback_file 
-  #truncate -s 1G /tmp/$VDO_DEVICE-tmp_loopback_file 
-
-  LOOPBACK=$(losetup -f /tmp/$VDO_DEVICE-tmp_loopback_file --show)
-
+  _tmpSnapDev
+  
   dmsetup create $VDO_DEVICE-origin --table "0 $VDO_SECTORS snapshot-origin /dev/mapper/$VDO_DEVICE"
-
   dmsetup create $VDO_DEVICE-snap --table "0 $VDO_SECTORS snapshot /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096 2 discard_zeroes_cow discard_passdown_origin"
 
-# Temporary directory function
+  if [ $? -ne 0 ]; then
+    dmsetup remove $VDO_DEVICE-origin
+    losetup  -d $LOOPBACK
+    _rmSnpDir
+    exit 1
+  fi
+
   _tmpMountPoint
 
-# FSTRIM function
   _fstrimVDO
-
-# Restoring original stack
 
   _mergeVDO
 
-  losetup  -d $LOOPBACK
-  rm -f /tmp/$VDO_DEVICE-tmp_loopback_file
+  _rmSnpDir
 
   echo "Recovery complete. Extend underlying disk"
   exit 0
 
 }
 
-_tmpDevSize(){
+_tmpSnapDev(){
 
-VDO_DISK=$(vdostats | grep $VDO_DEVICE | awk '{print $2}')
+  VDO_DISK=$(vdostats $VDO_VOLUME | awk 'NR==2 {print $2}') #1K-blocks
+  LO_DEV_SIZE=$(((($VDO_DISK*5/100)/1024))) #1M-blocks
+  SNAPDEV=$(($LO_DEV_SIZE*1024)) #1K-blocks
 
-LO_DEV_SIZE=$(((($VDO_DISK*10)/100)*1024))
+  if [[ -z $MNTPT ]]; then
+          TMPFS=$(df -k /run | awk 'NR==2 {print $4}')
+          if [[ TMPFS -gt SNAPDEV ]]; then
+                  mkdir /run/vdo
+                  RUNDIR=/run/vdo
+                  truncate -s ${LO_DEV_SIZE}M $RUNDIR/$VDO_DEVICE-tmp_loopback_file
+                  LOOPBACK=$(losetup -f $RUNDIR/$VDO_DEVICE-tmp_loopback_file --show)
+          else
+                  echo "Not enough free space for Snapshot"
+                  echo "Specify a mount-point"
+                  exit 1
+          fi
+  else
+          MNTDEVSIZE=$(df -k $MNTPT | awk 'NR==2 {print $4}')
+          if [[ MNTDEVSIZE -gt SNAPDEV ]]; then
+                  truncate -s ${LO_DEV_SIZE}M $MNTPT/$VDO_DEVICE-tmp_loopback_file
+                  LOOPBACK=$(losetup -f $MNTPT/$VDO_DEVICE-tmp_loopback_file --show)
+          else
+                  echo "Specified mount-point doesn't have enough free space"
+                  exit 1
+          fi
+  fi
 
 }
 
 _tmpMountPoint(){
 
-  TMPDIR=/tmp
   timestamp=`date +%Y-%m-%d_%H:%M:%S`
   mkdir -p $TMPDIR/vdo-recover-$timestamp
   MOUNT_POINT=$TMPDIR/vdo-recover-$timestamp
@@ -93,45 +118,38 @@ _tmpMountPoint(){
 
 _checkVDO(){
 
-VDO_LIST=$(vdo list)
+  VDO_LIST=$(vdo list)
 
-VDO_DEVICE=$(echo $VDO_VOLUME | awk -F "/" '{print $4}')
+  VDO_DEVICE=$(echo $VDO_VOLUME | awk -F "/" '{print $4}')
 
 }
 
-# Check if argument passed or not
-
-#if [ -z $1 ] || [ -z $2 ]; then
 if [ -z $1 ]; then
 	echo "Usage: bash vdo_recover.sh <vdo device>"
   exit 1
 else
   
-  # Check if script is run by root user
   if [[ $EUID -ne 0 ]]; then
     echo "$0: cannot open $VDO_DEVICE: Permission denied" 1>&2
     exit 1
   else
-    # Check for valid VDO volume
     _checkVDO
 
     for entry in $VDO_LIST;
     do
             if [ ${entry[@]} = $VDO_DEVICE ]; then
 
-                    # Checking if filesystem is mounted or not
                     if grep -qs "$VDO_VOLUME" /proc/mounts; then
                       echo "$VDO_VOLUME is mounted."
                       exit 1
                     else
                       echo "It's not mounted, recovery process started"
-                      # Recovery function
                       _recoveryProcess
                     fi
             else
                     echo "$VDO_DEVICE not present"
-                    exit 1
             fi
     done
+    exit 1
   fi
 fi
