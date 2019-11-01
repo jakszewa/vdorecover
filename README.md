@@ -1,2 +1,2 @@
-# vdo_recover
-VDO Snapshot Recovery
+# vdorecover
+VDO Recovery using Snapshot 
