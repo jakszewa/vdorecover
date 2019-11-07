@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 
 VDO_VOLUME=$1
 MNTPT=$2
@@ -6,21 +6,22 @@ MNTPT=$2
 _waitForRMFiles(){
   ANS='n'
   while [[ $ANS != y ]] ;do
+          echo " "
           echo "Remove few files from  $MOUNT_POINT"
-          echo "\n"
-          echo -n 1 "Proceed? [y/n]: "
-          read ANS
+          echo " "
+          echo -n "Proceed? [y/n]: "
+          read -n 1 ANS
   done
 }
 
 _runFSTRIM(){
-  KEEPGOING=true
+  local KEEPGOING=true
 
   while $KEEPGOING; do
           fstrim $MOUNT_POINT
           FSOUT=$(echo $?)
-          FREE=$(vdostats $VDO_VOLUME | awk 'NR==2 {print $5}' |  sed 's/%//')
-          if [[ $FSOUT -ne 0 || $FREE == 100 ]];then
+          USED=$(vdostats $VDO_VOLUME | awk 'NR==2 {print $5}' |  sed 's/%//')
+          if [[ $FSOUT -ne 0 || $USED == 100 ]];then
                   _waitForRMFiles
           else
                   KEEPGOING=false
@@ -30,7 +31,7 @@ _runFSTRIM(){
 }
 
 _umtDIR(){
-  UMNT=true
+  local UMNT=true
   while $UMNT; do
           umount $MOUNT_POINT
           UOUT=$(echo $?)
@@ -62,12 +63,25 @@ _mergeVDO(){
   dmsetup suspend $VDO_DEVICE-snap
   dmsetup create $VDO_DEVICE-merge --table "0 $VDO_SECTORS snapshot-merge /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096"
 
-  local NUMERATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $4}' | awk -F "/" '{print $1}')
-  local DENOMINATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $5}')
+  #local NUMERATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $4}' | awk -F "/" '{print $1}')
+  #local DENOMINATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $5}')
 
-  if [[ $NUMERATOR -ne $DENOMINATOR ]];then
-        read -t 30
-  fi
+  #if [[ $NUMERATOR -ne $DENOMINATOR ]];then
+        #read -t 10
+  #fi
+  local KEEPGOING=true
+
+  while $KEEPGOING; do
+          local NUMERATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $4}' | awk -F "/" '{print $1}')
+          local DENOMINATOR=$(dmsetup status $VDO_DEVICE-merge | awk '{print $5}')
+
+          if [[ $NUMERATOR -ne $DENOMINATOR ]];then
+                  read -p "Merging" -t 3
+                  echo " "
+          else
+                  KEEPGOING=false
+          fi
+  done
 
   dmsetup remove $VDO_DEVICE-merge
   dmsetup remove $VDO_DEVICE-snap
@@ -91,6 +105,7 @@ _recoveryProcess(){
 
   _tmpSnapDev
   
+  echo "Recovery process started for $VDO_VOLUME"
   dmsetup create $VDO_DEVICE-origin --table "0 $VDO_SECTORS snapshot-origin /dev/mapper/$VDO_DEVICE"
   dmsetup create $VDO_DEVICE-snap --table "0 $VDO_SECTORS snapshot /dev/mapper/$VDO_DEVICE $LOOPBACK PO 4096 2 discard_zeroes_cow discard_passdown_origin"
 
@@ -109,7 +124,7 @@ _recoveryProcess(){
 
   _rmSnpDir
 
-  echo "Recovery complete. Extend underlying disk"
+  echo "Recovery process completed, $VDO_VOLUME is ${USED}% Used"
   exit 0
 
 }
@@ -133,13 +148,26 @@ _tmpSnapDev(){
                   exit 1
           fi
   else
-          MNTDEVSIZE=$(df -k $MNTPT | awk 'NR==2 {print $4}')
-          if [[ MNTDEVSIZE -gt SNAPDEV ]]; then
-                  truncate -s ${LO_DEV_SIZE}M $MNTPT/$VDO_DEVICE-tmp_loopback_file
-                  LOOPBACK=$(losetup -f $MNTPT/$VDO_DEVICE-tmp_loopback_file --show)
+          #MNTDEVSIZE=$(df -k $MNTPT | awk 'NR==2 {print $4}')
+          #if [[ MNTDEVSIZE -gt SNAPDEV ]]; then
+                  #truncate -s ${LO_DEV_SIZE}M $MNTPT/$VDO_DEVICE-tmp_loopback_file
+                  #LOOPBACK=$(losetup -f $MNTPT/$VDO_DEVICE-tmp_loopback_file --show)
+          #else
+                  #echo "Specified mount-point doesn't have enough free space"
+                  #exit 1
+          #fi
+          if [[ -d $MNTPT ]]; then
+            MNTDEVSIZE=$(df -k $MNTPT | awk 'NR==2 {print $4}')
+            if [[ MNTDEVSIZE -gt SNAPDEV ]]; then
+                    truncate -s ${LO_DEV_SIZE}M $MNTPT/$VDO_DEVICE-tmp_loopback_file
+                    LOOPBACK=$(losetup -f $MNTPT/$VDO_DEVICE-tmp_loopback_file --show)
+            else
+                    echo "Specified mount-point doesn't have enough free space"
+                    exit 1
+            fi
           else
-                  echo "Specified mount-point doesn't have enough free space"
-                  exit 1
+              echo "$0: cannot access '$MNTPT': No such file or directory"
+              exit 1
           fi
   fi
 
@@ -163,8 +191,8 @@ _checkVDO(){
 
 }
 
-if [ -z $1 ]; then
-	echo "Usage: bash vdo_recover.sh <vdo device>"
+if [[ -z $1 ]] || [[ $1 == "--help" ]] || [[ $1 == "-h" ]]; then
+	echo "Usage: ./vdo_recover {vdo device} [Snapshot]"
   exit 1
 else
   
@@ -182,13 +210,14 @@ else
                       echo "$VDO_VOLUME is mounted."
                       exit 1
                     else
-                      echo "It's not mounted, recovery process started"
+                      #echo "It's not mounted, recovery process started"
                       _recoveryProcess
                     fi
-            else
-                    echo "$VDO_DEVICE not present"
+            #else
+                    #echo "$VDO_DEVICE not present"
             fi
     done
+    echo "$VDO_DEVICE not present"
     exit 1
   fi
 fi
