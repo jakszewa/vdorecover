@@ -1,179 +1,201 @@
 #!/bin/bash
+set -e
+_cleanup(){
+	echo "Error detected, cleaning up..."
+	umount $MOUNT_POINT || true 
+	DEVICE_NAME=$VDO_VOLUME_NAME
+	dmsetup remove $DEVICE_NAME-merge || true
+	dmsetup remove $DEVICE_NAME-origin || true
+	dmsetup remove $DEVICE_NAME-snap || true
+	losetup -d $LOOPBACK1 || true
+	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
+	dmsetup remove $VDO_VOLUME_NAME || true
+	DEVICE_NAME=$(basename $VDO_BACKING)
+	dmsetup remove $DEVICE_NAME-merge || true
+	dmsetup remove $DEVICE_NAME-origin || true
+	dmsetup remove $DEVICE_NAME-snap || true
+	losetup -d $LOOPBACK0 || true 
+	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
+}
 
 _waitForUserToDeleteStuff(){
-  MOUNT_POINT=$1
-  ANS='n'
-  while [[ $ANS != y ]] ;do
-          echo " "
-          echo "Remove some files from $MOUNT_POINT"
-          echo " "
-          echo -n "Proceed? [y/n]: "
-          read -n 1 ANS
-  done
+	MOUNT_POINT=$1
+	ANS='n'
+	while [[ $ANS != y ]] ;do
+		echo " "
+		echo "Please remove some files from $MOUNT_POINT, then proceed"
+		echo " "
+		echo -n "Proceed? [y/n]: "
+		read -n 1 ANS
+	done
 }
 
 _fstrimDir(){
-  MOUNT_POINT=$1
-  local KEEPGOING=true
+	MOUNT_POINT=$1
+	local KEEPGOING=true
 
-  while $KEEPGOING; do
-          fstrim $MOUNT_POINT
-          FSOUT=$(echo $?)
-          USED=$(vdostats $VDO_VOLUME_NAME | awk 'NR==2 {print $5}' |  sed 's/%//')
-          if [[ $FSOUT -ne 0 || $USED == 100 ]];then
-		  _waitForUserToDeleteStuff $MOUNT_POINT
-          else
-                  KEEPGOING=false
-          fi
-  done
+	while $KEEPGOING; do
+		fstrim $MOUNT_POINT
+		FSOUT=$(echo $?)
+		USED=$(vdostats $VDO_VOLUME_NAME | awk 'NR==2 {print $5}' |  sed 's/%//')
+		echo "Now down to just ${USED}% used"
+		if [[ $FSOUT -ne 0 || $USED == 100 ]];then
+			_waitForUserToDeleteStuff $MOUNT_POINT
+		else
+			KEEPGOING=false
+		fi
+	done
 }
 
 _fstrim(){
-  DEVICE=$1
-  MOUNT=$2
-  local NUMERATOR=$(dmsetup status $DEVICE | awk '{print $4}' | awk -F "/" '{print $1}')
-  local DENOMINATOR=$(dmsetup status $DEVICE | awk '{print $5}')
+	DEVICE=$1
+	MOUNT_POINT=$2
+	local NUMERATOR=$(dmsetup status $DEVICE | awk '{print $4}' | awk -F "/" '{print $1}')
+	local DENOMINATOR=$(dmsetup status $DEVICE | awk '{print $4}' | awk -F "/" '{print $2}')
 
-
-  if [[ $NUMERATOR -lt $DENOMINATOR ]]; then
-          _fstrimDir $MOUNT
-  else
-	echo "No room on snapshot for fstrim!"
-  fi
+	if [[ $NUMERATOR -lt $DENOMINATOR ]]; then
+		echo "Beginning space reclaim process -- running fstrim..."
+		_fstrimDir $MOUNT_POINT
+	else
+		echo "No room on snapshot for fstrim!"
+	fi
 }
 
 _unmount(){
-  MOUNT_POINT=$1
-  local UMNT=true
-  while $UMNT; do
-          umount $MOUNT_POINT
-          UOUT=$(echo $?)
-          if [[ $UOUT -ne 0 ]]; then
-                  echo "Process still has a open file or directory in $MOUNT_POINT"
-                  sleep 10
-          else
-                  UMNT=false
-          fi
-  done
-  rmdir $MOUNT_POINT
+	MOUNT_POINT=$1
+	local UMNT=true
+	while $UMNT; do
+		umount $MOUNT_POINT
+		UOUT=$(echo $?)
+		if [[ $UOUT -ne 0 ]]; then
+			echo "Process still has a open file or directory in $MOUNT_POINT"
+			sleep 10
+		else
+			UMNT=false
+		fi
+	done
+	rmdir $MOUNT_POINT
 }
 
 _waitForMerge(){
-  DEVICE= $1
-  local KEEPGOING=true
+	DEVICE=$1
+	local KEEPGOING=true
 
-  while $KEEPGOING; do
-          local NUMERATOR=$(dmsetup status $DEVICE | awk '{print $4}' | awk -F "/" '{print $1}')
-          local DENOMINATOR=$(dmsetup status $DEVICE | awk '{print $5}')
+	while $KEEPGOING; do
+		local NUMERATOR=$(dmsetup status $DEVICE | awk '{print $4}' | awk -F "/" '{print $1}')
+		local DENOMINATOR=$(dmsetup status $DEVICE | awk '{print $5}')
 
-          if [[ $NUMERATOR -ne $DENOMINATOR ]];then
-                  read -p "Merging" -t 3
-                  echo " "
-          else
-                  KEEPGOING=false
-          fi
-  done
+		if [[ $NUMERATOR -ne $DENOMINATOR ]];then
+			printf "Merging, %u more chunks for %s\n" $((NUMERATOR - DENOMINATOR)) $DEVICE
+			sleep 1
+		else
+			KEEPGOING=false
+		fi
+	done
 }
 
 _mergeSnapshot(){
-  DEVICE= $1
-  
-  dmsetup remove $DEVICE-origin
-  dmsetup suspend $DEVICE-snap
-  MERGE_TABLE=$(dmsetup table $DEVICE-snap | awk "print $0,$1,snapshot-merge,$3,$4,$5,$6")
-  dmsetup create $DEVICE-merge --table "$MERGE_TABLE"
+	DEVICE=$1
+	DEVICE_NAME=$(basename $DEVICE)
+	dmsetup remove $DEVICE_NAME-origin
+	dmsetup suspend $DEVICE_NAME-snap
+	#dmsetup create $VDO_VOLUME_NAME --table "$(echo $VDO_TABLE | awk "{\$5=\"${VDO_BACKING}\"; print }")"
+	MERGE_TABLE=$(dmsetup table $DEVICE_NAME-snap | awk "{\$3=\"snapshot-merge\"; print }")
+	dmsetup create $DEVICE_NAME-merge --table "$MERGE_TABLE"
 
-  _waitForMerge
+	_waitForMerge $DEVICE_NAME-merge
 
-  dmsetup remove $DEVICE-merge
-  dmsetup remove $DEVICE-snap
-  losetup -d $(eval "$LOOPBACK_${DEVICE}")
-  rm $LOOPBACK_DIR/$DEVICE-tmp_loopback_file
+	dmsetup remove $DEVICE_NAME-merge
+	dmsetup remove $DEVICE_NAME-snap
 }
 
 _mergeDataSnap(){
-  PARENT=$1
-  _mergeSnapshot $1
+	PARENT=$1
+	_mergeSnapshot $1
+	losetup -d $LOOPBACK1
+	rm $LOOPBACK_DIR/$(basename $PARENT)-tmp_loopback_file
 }
 
-_mergeBackingVDO(){
-  VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
-  dmsetup remove $VDO_VOLUME_NAME
-  _merge $VDO_BACKING
-  
-  dmsetup create $VDO_DEVICE --table "$(echo $VDO_TABLE | awk \"{$5=${VDO_BACKING}; print}\")"
+_mergeBackingSnap(){
+	VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
+	dmsetup remove $VDO_VOLUME_NAME
+	_mergeSnapshot $VDO_BACKING
+
+	dmsetup create $VDO_VOLUME_NAME --table "$(echo $VDO_TABLE | awk "{\$5=\"${VDO_BACKING}\"; print }")"
+
+	losetup -d $LOOPBACK0
+	rm $LOOPBACK_DIR/$(basename $VDO_BACKING)-tmp_loopback_file
 }
 
 _mkloop(){
-  DEVICE=$1
-  LO_DEV_SIZE= $(($(blockdev --getsz $DEVICE)*10/100)) # 5% of parent dev size. In kb.
-  TMPFS=$(df -k $LOOPBACK_DIR | awk 'NR==3 {print $4}')  
-  if [[ TMPFS -gt LO_DEV_SIZE ]]; then          
-          echo "Not enough free space for Snapshot"
-          echo "Specify LOOPBACK_DIR with free space."
-          exit 1
-  fi
-  truncate -s ${LO_DEV_SIZE}M $LOOPBACK_DIR/$DEVICE-tmp_loopback_file
-  LOOPBACK=$(losetup -f $LOOPBACK_DIR/$DEVICE-tmp_loopback_file --show)
-  eval "LOOPBACK_${DEVICE}=$LOOPBACK"
+	DEVICE=$1
+	LO_DEV_SIZE=${TMPFILESZ:-$(($(blockdev --getsz $DEVICE)*10/100))}
+	DEVICE_NAME=$(basename $DEVICE)
+	TMPFS=$(df -k $LOOPBACK_DIR | awk 'NR==2 {print $4}')  
+	if [[ TMPFS -lt LO_DEV_SIZE ]]; then          
+		echo "Not enough free space for Snapshot"
+		echo "Specify LOOPBACK_DIR with free space or smaller TMPFILESZ in kb"
+		exit 1
+	fi
+	truncate -s ${LO_DEV_SIZE}M $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file
+	LOOPBACK=$(losetup -f $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file --show)
 }
 
 _snap(){
-  DEVICE=$1
-  dmsetup create $DEVICE-origin --table "0 `blockdev --getsz $DEVICE` snapshot-origin $DEVICE"
-  _mkloop $DEVICE
-  dmsetup create $DEVICE-snap --table "0 `blockdev --getsz $DEVICE` snapshot $DEVICE $LOOPBACK PO 4096"
+	DEVICE=$1
+	DEVICE_NAME=$(basename $DEVICE)
+	dmsetup create $DEVICE_NAME-origin --table "0 `blockdev --getsz $DEVICE` snapshot-origin $DEVICE"
+	_mkloop $DEVICE
+	dmsetup create $DEVICE_NAME-snap --table "0 `blockdev --getsz $DEVICE` snapshot $DEVICE $LOOPBACK PO 4096 2 discard_zeroes_cow discard_passdown_origin"
 }   
 
 _insertSnapUnderVDO(){
-  VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
-  VDO_BACKING=$(echo $VDO_TABLE | cut -d 5)
-  dmsetup remove $VDO_VOLUME_NAME
-  _snap $VDO_BACKING
-  
-  dmsetup create $VDO_DEVICE --table "$(echo $VDO_TABLE | awk \"{$5=${VDO_BACKING_SNAP}; print}\")"
+	VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
+	VDO_BACKING=$(echo $VDO_TABLE | cut -d' ' -f 5)
+	dmsetup remove $VDO_VOLUME_NAME
+	VDO_BACKING_NAME=$(basename $VDO_BACKING)
+	_snap $VDO_BACKING
+	LOOPBACK0=$LOOPBACK
+	VDO_TABLE=$(echo $VDO_TABLE | awk "{ \$5=\"/dev/mapper/${VDO_BACKING_NAME}-snap\"; print  }")
+	dmsetup create $VDO_VOLUME_NAME --table "${VDO_TABLE}"
 }
 
 _addSnapAboveVDO(){
-  _snap $VDO_VOLUME_NAME
+	_snap $VDO_DEVICE
+	LOOPBACK1=$LOOPBACK
 }
 
 _tmpMount(){
-  DEVICE= $1
-  MOUNT_POINT=$(mktemp -d vdo-recover-XXXXXXXX)
-  mount $1 $MOUNT_POINT
-  echo $MOUNT_POINT
+	DEVICE=$1
+	MOUNT_POINT=$(mktemp --tmpdir -d vdo-recover-XXXXXXXX)
+	mount $1 $MOUNT_POINT
+	echo $MOUNT_POINT
 }
 
 _recoveryProcess(){
 
-  echo "Recovery process started"
+	echo "Recovery process started"
 
-  LOOPBACK_DIR=${LOOPBACK_DIR:-$(mktemp -d vdo-loopback-XXX)}
+	LOOPBACK_DIR=${LOOPBACK_DIR:-$(mktemp -d --tmpdir vdo-loopback-XXX)}
 
-  ##done  
-  _insertSnapUnderVDO
-  
-  ##done  
-  SNAP=$(_addSnapAboveVDO)
+	_insertSnapUnderVDO
 
-  ##done
-  MOUNT=$(_tmpMount $SNAP)
-  
-  ##done
-  _fstrim $SNAP $MOUNT
+	_addSnapAboveVDO
+	SNAP="/dev/mapper/$(basename ${VDO_DEVICE}-snap)"
 
-  ##done
-  _unmount $MOUNT
+	MOUNT=$(_tmpMount $SNAP)
 
-  ##done  
-  _mergeDataSnap $VDO_VOLUME_NAME
+	_fstrim $SNAP $MOUNT
 
-  ##done  
-  _mergeBackingSnap
+	echo "Beginning commit of data changes"
 
-  echo "Recovery process completed, $VDO_VOLUME_NAME is ${USED}% Used"
-  exit 1
+	_unmount $MOUNT
+
+	_mergeDataSnap $VDO_VOLUME_NAME
+
+	_mergeBackingSnap
+
+	echo "Recovery process completed, $VDO_VOLUME_NAME is ${USED}% Used"
 }
 
 #######################################################################
@@ -182,29 +204,32 @@ VDO_VOLUME_NAME=$(basename $VDO_DEVICE)
 
 if [[ -z $1 ]] || [[ $1 == "--help" ]] || [[ $1 == "-h" ]]; then
 	echo "Usage: ./vdo_recover {path to vdo device}"
-  exit 1
+	exit 1
 else
-  
-  if [[ $EUID -ne 0 ]]; then
-    echo "$0: cannot open $VDO_DEVICE: Permission denied" 1>&2
-    exit 1
-  else
-    for entry in $(dmsetup ls --target vdo)
-    do
-            if [ ${entry[@]} = $VDO_VOLUME_NAME ]; then
 
-                    if grep -qs "$VDO_VOLUME_NAME" /proc/self/mounts; then
-                      echo "$VDO_VOLUME_NAME is mounted."
-                      exit 1
-                    else
-                      #echo "It's not mounted, recovery process started"
-                      _recoveryProcess
-                    fi
-            #else
-                    #echo "$VDO_DEVICE not present"
-            fi
-    done
-    echo "$VDO_DEVICE not detected -- not running?"
-    exit 1
-  fi
+	if [[ $EUID -ne 0 ]]; then
+		echo "$0: cannot open $VDO_DEVICE: Permission denied" 1>&2
+		exit 1
+	else
+		for entry in $(dmsetup ls --target vdo)
+		do
+			if [ ${entry[@]} = $VDO_VOLUME_NAME ]; then
+
+				if grep -qs "$VDO_DEVICE" /proc/self/mounts ; then
+					echo "$VDO_VOLUME_NAME appears mounted."
+					grep "$VDO_DEVICE" /proc/self/mounts
+					exit 1
+				else
+					trap _cleanup 0
+					_recoveryProcess
+					trap - 0
+					exit 0
+				fi
+			else
+				echo "$VDO_DEVICE not present"
+			fi
+		done
+		echo "$VDO_DEVICE not detected -- not running?"
+		exit 1
+	fi
 fi
