@@ -215,7 +215,7 @@ else
 		do
 			if [ ${entry[@]} = $VDO_VOLUME_NAME ]; then
 
-				if grep -qs "$VDO_DEVICE" /proc/self/mounts ; then
+				if grep -qs "$VDO_DEVICE$" /proc/self/mounts ; then
 					echo "$VDO_VOLUME_NAME appears mounted."
 					grep "$VDO_DEVICE" /proc/self/mounts
 					exit 1
