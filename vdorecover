@@ -19,6 +19,10 @@ _enableOriginalVDO(){
 _cleanup(){
 	echo "Error detected, cleaning up..."
 	umount $MOUNT_POINT || true
+	if [[ -n $VDO_DEPENDENT_DEV_ORIGINAL_TABLE ]]; then
+		dmsetup reload $VDO_DEPENDENT_DEV --table "${VDO_DEPENDENT_DEV_ORIGINAL_TABLE}"
+		dmsetup resume $VDO_DEPENDENT_DEV
+	fi
 	if [[ -n $VDO_VOLUME_NAME  ]]; then
 		DEVICE_NAME=$VDO_VOLUME_NAME
 		dmsetup remove $DEVICE_NAME-merge || true
@@ -55,12 +59,12 @@ _waitForUserToDeleteStuff(){
 	done
 }
 
-_fstrimDir(){
+_fstrimAndPrompt(){
 	MOUNT_POINT=$1
 	local KEEPGOING=true
 
 	while $KEEPGOING; do
-		fstrim $MOUNT_POINT
+		fstrim $MOUNT_POINT || true
 		FSOUT=$(echo $?)
 		USED=$(vdostats $VDO_VOLUME_NAME | awk 'NR==2 {print $5}' |  sed 's/%//')
 		echo "Now down to just ${USED}% used"
@@ -80,7 +84,7 @@ _fstrim(){
 
 	if [[ $NUMERATOR -lt $DENOMINATOR ]]; then
 		echo "Beginning space reclaim process -- running fstrim..."
-		_fstrimDir $MOUNT_POINT
+		_fstrimAndPrompt $MOUNT_POINT
 	else
 		echo "No room on snapshot for fstrim!"
 	fi
@@ -136,7 +140,18 @@ _mergeSnapshot(){
 
 _mergeDataSnap(){
 	PARENT=$1
+	if [[ -n $VDO_DEPENDENT_DEV ]]; then
+		dmsetup reload $VDO_DEPENDENT_DEV --table "0 `blockdev --getsz $VDO_DEVICE` error"
+		dmsetup resume $VDO_DEPENDENT_DEV
+	fi
+
 	_mergeSnapshot $1
+
+	if [[ -n $VDO_DEPENDENT_DEV ]]; then
+		dmsetup reload $VDO_DEPENDENT_DEV --table "0${VDO_DEPENDENT_DEV_ORIGINAL_TABLE}"
+		dmsetup resume $VDO_DEPENDENT_DEV
+	fi
+
 	losetup -d $LOOPBACK1
 	rm $LOOPBACK_DIR/$(basename $PARENT)-tmp_loopback_file
 }
@@ -170,6 +185,7 @@ _snap(){
 	dmsetup create $DEVICE_NAME-origin --table "0 `blockdev --getsz $DEVICE` snapshot-origin $DEVICE"
 	_mkloop $DEVICE
 	dmsetup create $DEVICE_NAME-snap --table "0 `blockdev --getsz $DEVICE` snapshot $DEVICE $LOOPBACK PO 4096 2 discard_zeroes_cow discard_passdown_origin"
+	SNAP="/dev/mapper/${DEVICE_NAME}-snap"
 }   
 
 _insertSnapUnderVDO(){
@@ -178,13 +194,15 @@ _insertSnapUnderVDO(){
 	VDO_BACKING_NAME=$(basename $VDO_BACKING)
 	_snap $VDO_BACKING
 	LOOPBACK0=$LOOPBACK
-	SNAP_VDO_TABLE=$(echo $VDO_TABLE | awk "{ \$5=\"/dev/mapper/${VDO_BACKING_NAME}-snap\"; print  }")
+	SNAP_UNDER_VDO=$SNAP
+	SNAP_VDO_TABLE=$(echo $VDO_TABLE | awk "{ \$5=\"${SNAP_UNDER_VDO}\"; print  }")
 	dmsetup reload $VDO_VOLUME_NAME --table "${SNAP_VDO_TABLE}"
 	dmsetup resume $VDO_VOLUME_NAME
 }
 
 _addSnapAboveVDO(){
 	_snap $VDO_DEVICE
+	SNAP_OVER_VDO=$SNAP
 	LOOPBACK1=$LOOPBACK
 }
 
@@ -193,6 +211,42 @@ _tmpMount(){
 	MOUNT_POINT=$(mktemp --tmpdir -d vdo-recover-XXXXXXXX)
 	mount $1 $MOUNT_POINT
 	echo $MOUNT_POINT
+}
+
+_mountVDOSnap(){
+	MOUNT=$(_tmpMount $SNAP_OVER_VDO)
+
+	_fstrim $SNAP_OVER_VDO $MOUNT
+
+	echo "Beginning commit of data changes"
+
+	_unmount $MOUNT
+}
+
+_repointUpperDevicesOrMountVDO(){
+	# Check whether some other device is using VDO. If so, change that
+	# device to point at the VDO snap and prompt the user to clean up;
+	# else mount the VDO snap, fstrim, &c.
+	SNAP_OVER_BASENAME=$(basename $SNAP_OVER_VDO)
+	VDO_MAJMIN=$(dmsetup ls | grep \\\b$VDO_VOLUME_NAME\\\s | cut -f 2)
+        VDO_MAJMIN_DEPS_VERSION=$(echo $VDO_MAJMIN | sed "s/:/, /g")
+	ORIGIN_OVER_BASENAME=$(echo $SNAP_OVER_BASENAME | sed 's/snap$/origin/')
+	VDO_DEPENDENT_DEV=$(dmsetup deps | grep "${VDO_MAJMIN_DEPS_VERSION}"\
+	       		    | grep -v \\\b$ORIGIN_OVER_BASENAME\\\b\
+		    	    | grep -v \\\b$SNAP_OVER_BASENAME\\\b\
+			    | cut -d':' -f 1)
+	if [[ -n $VDO_DEPENDENT_DEV ]]; then
+		echo "Detecting dependent device $VDO_DEPENDENT_DEV on $VDO_VOLUME_NAME -- manual intervention will be required"
+		VDO_DEPENDENT_DEV_ORIGINAL_TABLE=$(dmsetup table $VDO_DEPENDENT_DEV)
+		DEPENDENT_NEW_TABLE=$(echo $VDO_DEPENDENT_DEV_ORIGINAL_TABLE | sed "s#^${VDO_MAJMIN}\$#${SNAP_OVER_VDO}#g; s#^${VDO_DEVICE}\$#${SNAP_OVER_VDO}#g")
+		dmsetup reload $VDO_DEPENDENT_DEV --table "${DEPENDENT_NEW_TABLE}"
+		dmsetup resume $VDO_DEPENDENT_DEV
+		echo "You may want to remount, and run fstrim, on any filesystem"
+	        echo "mounted on ${VDO_DEPENDENT_DEV}."
+		_fstrimAndPrompt "the device or filesystem atop ${VDO_DEPENDENT_DEV}"
+	else
+		_mountVDOSnap
+	fi
 }
 
 _recoveryProcess(){
@@ -204,16 +258,10 @@ _recoveryProcess(){
 	_insertSnapUnderVDO
 
 	_addSnapAboveVDO
-	SNAP="/dev/mapper/$(basename ${VDO_DEVICE}-snap)"
 
-	MOUNT=$(_tmpMount $SNAP)
-
-	_fstrim $SNAP $MOUNT
+	_repointUpperDevicesOrMountVDO
 
 	echo "Beginning commit of data changes"
-
-	_unmount $MOUNT
-
 	_mergeDataSnap $VDO_VOLUME_NAME
 
 	_mergeBackingSnap
