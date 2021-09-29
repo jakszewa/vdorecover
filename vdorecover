@@ -1,5 +1,4 @@
 #!/bin/bash
-
 ##
 # Copyright Red Hat.
 # By Sweet Tea Dorminy, Awez Shaikh, Nikhil Kshirsagar
@@ -7,6 +6,16 @@
 # Licensed under the GPL 2. See LICENSE in this repository.
 ##
 set -e
+_disableVDO(){
+	dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
+	dmsetup resume $VDO_VOLUME_NAME
+}
+
+_enableOriginalVDO(){
+	dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
+	dmsetup resume $VDO_VOLUME_NAME
+}
+
 _cleanup(){
 	echo "Error detected, cleaning up..."
 	umount $MOUNT_POINT || true
@@ -19,8 +28,7 @@ _cleanup(){
 	losetup -d $LOOPBACK1 || true
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
 	if [[ -n $VDO_TABLE ]]; then
-		dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
-		dmsetup resume $VDO_VOLUME_NAME
+		_disableVDO
 	fi
 	DEVICE_NAME=$(basename $VDO_BACKING)
 	if [[ -n $DEVICE_NAME ]]; then
@@ -29,8 +37,7 @@ _cleanup(){
 		dmsetup remove $DEVICE_NAME-snap || true
 	fi
 	if [[ -n $VDO_TABLE ]]; then
-		dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
-		dmsetup resume $VDO_VOLUME_NAME
+		_enableOriginalVDO
 	fi
 	losetup -d $LOOPBACK0 || true 
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
@@ -135,12 +142,9 @@ _mergeDataSnap(){
 }
 
 _mergeBackingSnap(){
-	dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
-	dmsetup resume $VDO_VOLUME_NAME
+	_disableVDO
 	_mergeSnapshot $VDO_BACKING
-
-	dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
-	dmsetup resume $VDO_VOLUME_NAME
+	_enableOriginalVDO
 
 	losetup -d $LOOPBACK0
 	rm $LOOPBACK_DIR/$(basename $VDO_BACKING)-tmp_loopback_file
@@ -170,8 +174,7 @@ _snap(){
 
 _insertSnapUnderVDO(){
 	VDO_BACKING=$(echo $VDO_TABLE | cut -d' ' -f 5)
-	dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
-	dmsetup resume $VDO_VOLUME_NAME
+	_disableVDO
 	VDO_BACKING_NAME=$(basename $VDO_BACKING)
 	_snap $VDO_BACKING
 	LOOPBACK0=$LOOPBACK
