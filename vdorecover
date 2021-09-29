@@ -2,18 +2,26 @@
 set -e
 _cleanup(){
 	echo "Error detected, cleaning up..."
-	umount $MOUNT_POINT || true 
-	DEVICE_NAME=$VDO_VOLUME_NAME
-	dmsetup remove $DEVICE_NAME-merge || true
-	dmsetup remove $DEVICE_NAME-origin || true
-	dmsetup remove $DEVICE_NAME-snap || true
+	umount $MOUNT_POINT || true
+	if [[ -n $VDO_VOLUME_NAME  ]]; then
+		DEVICE_NAME=$VDO_VOLUME_NAME
+		dmsetup remove $DEVICE_NAME-merge || true
+		dmsetup remove $DEVICE_NAME-origin || true
+		dmsetup remove $DEVICE_NAME-snap || true
+	fi
 	losetup -d $LOOPBACK1 || true
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
 	dmsetup remove $VDO_VOLUME_NAME || true
 	DEVICE_NAME=$(basename $VDO_BACKING)
-	dmsetup remove $DEVICE_NAME-merge || true
-	dmsetup remove $DEVICE_NAME-origin || true
-	dmsetup remove $DEVICE_NAME-snap || true
+	if [[ -n $DEVICE_NAME ]]; then
+		dmsetup remove $DEVICE_NAME-merge || true
+		dmsetup remove $DEVICE_NAME-origin || true
+		dmsetup remove $DEVICE_NAME-snap || true
+	fi
+	if [[ -n $VDO_TABLE ]]; then
+		dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
+		dmsetup resume $VDO_VOLUME_NAME
+	fi
 	losetup -d $LOOPBACK0 || true 
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
 }
@@ -221,6 +229,7 @@ else
 					exit 1
 				else
 					trap _cleanup 0
+					VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
 					_recoveryProcess
 					trap - 0
 					exit 0
