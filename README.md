@@ -1,6 +1,10 @@
 # vdorecover
-VDO Recovery using two snapshots. 
+VDO Recovery from a full disk condition, using snapshots above and below VDO and temporary storage in /tmp. 
 
 Especially useful on bare-metal where underlying disks cannot increase in size the way they can in a VM. (Note VDO doesn't allow aggregating storage into one backing store device)
 
-Used successfully by Red Hat customers to recover VDO devices when no other method would have worked - see https://access.redhat.com/solutions/3520581#comment-2100841  
+Used successfully by Red Hat customers to recover VDO devices when no other method would have worked - see https://access.redhat.com/solutions/3520581#comment-2100841 
+
+Known bugs:
+
+On an LVM-created VDO, or indeed any VDO which is not the top of the stack, the step of mounting the filesystem for fstrimming doesn't work.
