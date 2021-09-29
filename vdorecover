@@ -1,11 +1,11 @@
+#!/bin/bash
+
 ##
 # Copyright Red Hat.
 # By Sweet Tea Dorminy, Awez Shaikh, Nikhil Kshirsagar
 #
 # Licensed under the GPL 2. See LICENSE in this repository.
 ##
-
-#!/bin/bash
 set -e
 _cleanup(){
 	echo "Error detected, cleaning up..."
