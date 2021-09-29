@@ -1,19 +1,37 @@
+##
+# Copyright Red Hat.
+# By Sweet Tea Dorminy, Awez Shaikh, Nikhil Kshirsagar
+#
+# Licensed under the GPL 2. See LICENSE in this repository.
+##
+
 #!/bin/bash
 set -e
 _cleanup(){
 	echo "Error detected, cleaning up..."
-	umount $MOUNT_POINT || true 
-	DEVICE_NAME=$VDO_VOLUME_NAME
-	dmsetup remove $DEVICE_NAME-merge || true
-	dmsetup remove $DEVICE_NAME-origin || true
-	dmsetup remove $DEVICE_NAME-snap || true
+	umount $MOUNT_POINT || true
+	if [[ -n $VDO_VOLUME_NAME  ]]; then
+		DEVICE_NAME=$VDO_VOLUME_NAME
+		dmsetup remove $DEVICE_NAME-merge || true
+		dmsetup remove $DEVICE_NAME-origin || true
+		dmsetup remove $DEVICE_NAME-snap || true
+	fi
 	losetup -d $LOOPBACK1 || true
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
-	dmsetup remove $VDO_VOLUME_NAME || true
+	if [[ -n $VDO_TABLE ]]; then
+		dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
+		dmsetup resume $VDO_VOLUME_NAME
+	fi
 	DEVICE_NAME=$(basename $VDO_BACKING)
-	dmsetup remove $DEVICE_NAME-merge || true
-	dmsetup remove $DEVICE_NAME-origin || true
-	dmsetup remove $DEVICE_NAME-snap || true
+	if [[ -n $DEVICE_NAME ]]; then
+		dmsetup remove $DEVICE_NAME-merge || true
+		dmsetup remove $DEVICE_NAME-origin || true
+		dmsetup remove $DEVICE_NAME-snap || true
+	fi
+	if [[ -n $VDO_TABLE ]]; then
+		dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
+		dmsetup resume $VDO_VOLUME_NAME
+	fi
 	losetup -d $LOOPBACK0 || true 
 	rm $LOOPBACK_DIR/$DEVICE_NAME-tmp_loopback_file || true
 }
@@ -117,11 +135,12 @@ _mergeDataSnap(){
 }
 
 _mergeBackingSnap(){
-	VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
-	dmsetup remove $VDO_VOLUME_NAME
+	dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
+	dmsetup resume $VDO_VOLUME_NAME
 	_mergeSnapshot $VDO_BACKING
 
-	dmsetup create $VDO_VOLUME_NAME --table "$(echo $VDO_TABLE | awk "{\$5=\"${VDO_BACKING}\"; print }")"
+	dmsetup reload $VDO_VOLUME_NAME --table "${VDO_TABLE}"
+	dmsetup resume $VDO_VOLUME_NAME
 
 	losetup -d $LOOPBACK0
 	rm $LOOPBACK_DIR/$(basename $VDO_BACKING)-tmp_loopback_file
@@ -150,14 +169,15 @@ _snap(){
 }   
 
 _insertSnapUnderVDO(){
-	VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
 	VDO_BACKING=$(echo $VDO_TABLE | cut -d' ' -f 5)
-	dmsetup remove $VDO_VOLUME_NAME
+	dmsetup reload $VDO_VOLUME_NAME --table "0 `blockdev --getsz $VDO_DEVICE` error"
+	dmsetup resume $VDO_VOLUME_NAME
 	VDO_BACKING_NAME=$(basename $VDO_BACKING)
 	_snap $VDO_BACKING
 	LOOPBACK0=$LOOPBACK
-	VDO_TABLE=$(echo $VDO_TABLE | awk "{ \$5=\"/dev/mapper/${VDO_BACKING_NAME}-snap\"; print  }")
-	dmsetup create $VDO_VOLUME_NAME --table "${VDO_TABLE}"
+	SNAP_VDO_TABLE=$(echo $VDO_TABLE | awk "{ \$5=\"/dev/mapper/${VDO_BACKING_NAME}-snap\"; print  }")
+	dmsetup reload $VDO_VOLUME_NAME --table "${SNAP_VDO_TABLE}"
+	dmsetup resume $VDO_VOLUME_NAME
 }
 
 _addSnapAboveVDO(){
@@ -221,6 +241,7 @@ else
 					exit 1
 				else
 					trap _cleanup 0
+					VDO_TABLE=$(dmsetup table $VDO_VOLUME_NAME)
 					_recoveryProcess
 					trap - 0
 					exit 0
